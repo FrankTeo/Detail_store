@@ -1,0 +1,492 @@
+
+
+/********************************************************************
+copyright (C), 1995-2004, Si-Tech Information Technology Ltd. 
+file_name: oracall.pc   
+author: 张凡 version: （V1.00） date: （2004－08－20）
+description: oracall 数据库操作
+others:
+history: 1.date: 修改时间 version: 版本（V1.00）author: 作者
+			modification: 修改内容
+		 2. ... 
+********************************************************************/
+
+
+#include "cdef.h"
+
+
+EXEC SQL INCLUDE sqlca;
+EXEC SQL INCLUDE oraca;
+EXEC ORACLE OPTION (ORACA=YES);
+
+/************************************************************
+function: SqlError
+description: 错误处理函数。
+input:
+output:
+return:
+others:
+***********************************************************/
+
+void  SqlError( )
+{
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_WARN, "sqlcode = [%d]\n", sqlca.sqlcode );
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_WARN, "sqlca %.*s\n", sqlca.sqlerrm.sqlerrml, sqlca.sqlerrm.sqlerrmc );
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_WARN, "oraca %.*s\n", oraca.orastxt.orastxtl, oraca.orastxt.orastxtc );
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_WARN, "on line %d of %.*s\n\n",oraca.oraslnr, oraca.orasfnm.orasfnml, oraca.orasfnm.orasfnmc );
+	
+	EXEC SQL WHENEVER SqlError CONTINUE;
+	EXEC SQL ROLLBACK RELEASE;
+	
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_EXIT, "数据库操作失败, 系统退出运行!\n\n" );
+}
+
+/************************************************************
+function: ConnectDataBase
+description: 建立数据库连接
+input: szUserName: 用户名
+	   szPassWord: 密码
+	   szServer: 数据库服务名
+output:
+return:
+others:
+***********************************************************/
+
+void ConnectDataBase( char * szUserName, char * szPassWord, char * szServer )
+{
+	char szLoginCmd[128];
+	
+	EXEC SQL WHENEVER SqlError DO SqlError();
+	
+	memset( szLoginCmd, 0, sizeof( szLoginCmd ) );
+	
+	sprintf( szLoginCmd, "%s/%s@%s", szUserName, szPassWord, szServer );
+
+	EXEC SQL CONNECT : szLoginCmd;
+}
+
+/************************************************************
+function: DisConnectDataBase
+description: 断开数据库连接
+input:
+output:
+return:
+others:
+***********************************************************/
+
+void DisConnectDataBase()
+{
+	EXEC SQL ROLLBACK WORK RELEASE;
+}
+
+/************************************************************
+function: GetCount
+description: 获取指定表的记录数
+input: szSqlStr: sql语句
+output:
+return: 记录数
+others:
+***********************************************************/
+
+int GetCount( char * szSqlStr )
+{
+	long lCount;
+	int nLoop;
+	
+	lCount = -1;
+	
+	EXEC SQL PREPARE sqlCount FROM :szSqlStr;
+	EXEC SQL DECLARE curCount CURSOR FOR sqlCount;
+	EXEC SQL OPEN curCount;
+	EXEC SQL WHENEVER NOT FOUND DO break;
+	
+	for( nLoop = 0 ;  ; nLoop++ )
+	{
+		EXEC SQL FETCH curCount INTO lCount;
+	}
+
+	EXEC SQL CLOSE curCount;
+	
+	return lCount;
+}
+
+/************************************************************
+function: GetProcCtrlFlag
+description: 获取系统运行控制标志
+input: szCtrlFlag: 运行控制标志
+output:
+return: 控制标志
+others:
+***********************************************************/
+
+int GetProcCtrlFlag( char * szCtrlFlag )
+{
+	char szSqlStr[2056];
+	char szFlag[16 + 1];
+	int nLoop;
+		
+	memset( szSqlStr, 0, sizeof( szSqlStr ) );
+	memset( szFlag, 0, sizeof( szFlag ) );
+	
+	sprintf( szSqlStr, "select operator_id from sys_proc where program_name = '%s'", szCtrlFlag );
+
+	EXEC SQL PREPARE sqlCtrl FROM :szSqlStr;
+	EXEC SQL DECLARE curCtrl CURSOR FOR sqlCtrl;
+	EXEC SQL OPEN curCtrl;
+	EXEC SQL WHENEVER NOT FOUND DO break;
+	
+	for( nLoop = 0 ;  ; nLoop++ )
+	{
+		EXEC SQL FETCH curCtrl INTO :szFlag;
+	}
+
+	EXEC SQL CLOSE curCtrl;
+
+	if( NULL == *(szFlag ) )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_GEN, "进程控制标志 %s 未在进程控制表 sys_proc 中定制!\n\n", szCtrlFlag );
+		return PROC_CTRL_EXIT;
+	}
+	else
+	{
+		return atoi( szFlag );
+	}
+}
+
+/************************************************************
+function: GetGroupKeyInfo
+description: 获取存储键值内容
+input: psControl: 详单存储信息
+output:
+return: MY_SUCCEED: 成功, 失败退出
+others:
+***********************************************************/
+
+int GetGroupKeyInfo ( PSTORE_CONTROL psControl )
+{
+	char szGroupKey[16 + 1];
+	char * szPos;
+	int nFieldNum;
+	
+	memset( szGroupKey, 0, sizeof( szGroupKey ) );
+	strcpy( szGroupKey, psControl->szGroupKey );
+	
+	memset( psControl->szKey, 0, sizeof( psControl->szKey ) );
+	
+	nFieldNum = 0;
+	
+	szPos = strtok( szGroupKey, GROUP_KEY_SEP );
+	while( NULL != szPos )
+	{
+		switch( nFieldNum )
+		{
+			case 0:		/* KEY 值 */
+			
+				strcpy( psControl->szKey, szPos );
+				break;
+				
+			case 1:		/* 开始键值 */
+			
+				psControl->nBeginKey = atoi(szPos );
+				break;
+			
+			case 2:    /* 结束键值 */
+				psControl->nEndKey = atoi(szPos );
+				break;
+			
+			default:
+				return MY_FAIL;
+		}
+		
+		nFieldNum++;
+		szPos = strtok( NULL, GROUP_KEY_SEP );
+	}
+	
+	if( 3 != nFieldNum )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "键值 %s 字段数 %d 不足!\n", psControl->szGroupKey, nFieldNum );
+		return MY_FAIL;
+	}
+		
+	return MY_SUCCEED;
+}
+ 
+/************************************************************
+function: GetStoreControlInfo
+description: 获取 store_control_table 中的记录
+input: psData: 描述系统全局结构的结构体
+output:
+return: MY_SUCCEED: 成功, 失败退出
+others:
+***********************************************************/
+
+
+int GetStoreControlInfo( PSTORE_DATA psData )
+{
+	PSTORE_HEAD psHead ;
+	PSTORE_CONTROL psControl; 
+	char szSqlStr[2056];
+	char szHeadFlag[HEAD_FLAG_LEN+1] ;
+	
+	char szHostName[32 + 1];
+	char szRootDir[64 + 1];
+	char szBaseDir[64 + 1];
+	char szGroupKey[16 + 1];
+	char szAlterTime[14 + 1];
+	char szOldRootDir[64 + 1];
+	char szOldBaseDir[64 + 1];
+	char szStoreMode[1 + 1];
+	
+	long lTotalHead;
+	int nLoop = 0, nLoop1 = 0;
+	
+	InitStoreHead( psData );
+	
+	memset( szSqlStr, 0, sizeof( szSqlStr ) );
+	
+
+	sprintf( szSqlStr, "select host_name, root_dir, base_dir, group_key, alter_time, old_root_dir, old_base_dir, store_mode from store_control_table where host_name = '%s' order by group_key", psData->szHostName );
+
+	for( nLoop1 = 0; nLoop1 < MAX_HEAD_NUM; nLoop1++ ) {
+		if( psData->psHead[nLoop1] == NULL ) { 
+			break ;
+		}
+
+		for( nLoop = 0; nLoop < MAX_MOBILE_HEAD; nLoop++ )
+		{
+			psData->psHead[nLoop1]->psControl[nLoop] = NULL;
+		}
+	}
+
+	lTotalHead = 0;
+	
+	EXEC SQL PREPARE  sqlStore FROM :szSqlStr;
+	EXEC SQL DECLARE  curStore CURSOR FOR sqlStore;
+	EXEC SQL OPEN  curStore;
+	EXEC SQL WHENEVER NOT FOUND DO break;
+	
+	for(  ;  ;  )
+	{
+		memset( szHostName, 0, sizeof( szHostName ) );
+		memset( szRootDir, 0, sizeof( szRootDir ) );
+		memset( szBaseDir, 0, sizeof( szBaseDir ) );
+		memset( szGroupKey, 0, sizeof( szGroupKey ) );
+		memset( szAlterTime, 0, sizeof( szAlterTime ) );
+		memset( szOldRootDir, 0, sizeof( szOldRootDir ) );
+		memset( szOldBaseDir, 0, sizeof( szOldBaseDir ) );
+		memset( szStoreMode, 0, sizeof( szStoreMode ) );
+		
+		EXEC SQL FETCH curStore INTO :szHostName, :szRootDir, :szBaseDir, :szGroupKey, :szAlterTime, :szOldRootDir, :szOldBaseDir, :szStoreMode;
+		
+		TrimLeft( TrimRight( szHostName ) );
+		TrimLeft( TrimRight( szRootDir ) );
+		TrimLeft( TrimRight( szBaseDir ) );
+		TrimLeft( TrimRight( szGroupKey ) );
+		TrimLeft( TrimRight( szAlterTime ) );
+		TrimLeft( TrimRight( szOldRootDir ) );
+		TrimLeft( TrimRight( szOldBaseDir ) );
+		TrimLeft( TrimRight( szStoreMode ) );
+/*
+printf("%s %s %s %s %s %s %s %s\n",szHostName,szRootDir,szBaseDir,szGroupKey,szAlterTime,szOldRootDir,szOldBaseDir,szStoreMode);
+continue ;
+*/
+
+		if( !IsMobileHead( szGroupKey )  )
+		{
+		/*	
+			if( NULL != psData->pscFixed )
+			{
+				MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "固定号码存储位置重复定义!\n" );
+				return MY_FAIL;
+			}
+		*/	
+			if( NULL == psData->pscFixed )
+			{
+				psData->pscFixed = (PSTORE_CONTROL) malloc( sizeof( STORE_CONTROL ) );
+				if( NULL == psData->pscFixed )
+				{
+					MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "申请保存固定号码详单存储位置信息的内存空间失败!\n" );
+					return MY_FAIL;
+				}
+				
+				memset( psData->pscFixed, 0, sizeof( STORE_CONTROL ) );
+				
+				psControl = psData->pscFixed;
+			}
+			else
+			{
+				psControl = psData->pscFixed;
+				
+				while( NULL != psControl )
+				{
+					if( NULL == psControl->pscNext )
+					{
+						break;
+					}
+					
+					psControl = psControl->pscNext;
+				}
+				
+				psControl->pscNext = (PSTORE_CONTROL) malloc( sizeof( STORE_CONTROL ) );
+				if( NULL == psControl->pscNext )
+				{
+					MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "申请保存固定号码详单存储位置信息的内存空间失败!\n" );
+					return MY_FAIL;
+				}
+				
+				memset( psControl->pscNext, 0, sizeof( STORE_CONTROL ) );
+				
+				psControl = psControl->pscNext;
+			}
+		}
+		else
+		{
+			strncpy( szHeadFlag, szGroupKey, HEAD_FLAG_LEN ) ;
+			szHeadFlag[HEAD_FLAG_LEN] = 0;
+			
+			for( nLoop = 0; nLoop < MAX_HEAD_NUM; nLoop++ ) {
+				/*psHead = psData->psHead + nLoop ;*/
+				psHead = psData->psHead[nLoop];
+				
+				if( psHead == NULL ) {
+					psData->psHead[nLoop] = (PSTORE_HEAD)malloc(sizeof(STORE_HEAD));
+					psHead = psData->psHead[nLoop];
+					if( psHead == NULL ) {
+						MyLog(INFO_SOURCE_APP,INFO_LEVEL_WARN,"申请保存详单存储位置信息的内存空间失败!\n" );
+						return MY_FAIL ;
+					}
+					strcpy( psHead->szHeadFlag, szHeadFlag ) ;
+					for( nLoop1 = 0; nLoop1 < MAX_MOBILE_HEAD; nLoop1++ ) {
+						psHead->psControl[nLoop1] = NULL ;
+					}
+					break ;
+				} else if( strcmp( psHead->szHeadFlag, szHeadFlag ) == 0 ) {
+					break ;
+				}
+			}
+			
+			if( nLoop >= MAX_HEAD_NUM )
+			{
+				MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "最大号码头个数 %s 不足!\n\n", MAX_HEAD_NUM );
+				return MY_FAIL;
+			}
+			
+			if( psHead->psControl[atoi(szGroupKey+HEAD_FLAG_LEN)] == NULL ) {
+				psHead->psControl[atoi(szGroupKey+HEAD_FLAG_LEN)] = (PSTORE_CONTROL) malloc(sizeof(STORE_CONTROL)) ;
+				if ( psHead->psControl[atoi(szGroupKey+HEAD_FLAG_LEN)] == NULL ) {
+					MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "申请保存详单存储位置信息的内存空间失败!\n" );
+					return MY_FAIL;
+				}
+			} else {
+				MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "分组字段 [%s] 重复定义!\n", szGroupKey );
+				return MY_FAIL;
+			}
+			/*printf( "TEST: %s %d %s\n", __FILE__, __LINE__, szGroupKey+HEAD_FLAG_LEN ) ;*/
+			
+			psControl = psHead->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )];
+			
+		}
+/*printf( "TEST: %s %d\n", __FILE__, __LINE__ ) ;*/
+		
+		memset( psControl, 0, sizeof( STORE_CONTROL ) );
+		
+		strcpy( psControl->szHostName, szHostName );
+		strcpy( psControl->szRootDir, szRootDir );
+		strcpy( psControl->szBaseDir, szBaseDir );
+		strcpy( psControl->szGroupKey, szGroupKey );
+		strcpy( psControl->szAlterTime, szAlterTime );
+		strcpy( psControl->szOldRootDir, szOldRootDir );
+		strcpy( psControl->szOldBaseDir, szOldBaseDir );
+		strcpy( psControl->szStoreMode, szStoreMode );
+/*
+strcpy( psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szHostName, szHostName );
+strcpy( psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szRootDir, szRootDir );
+strcpy( psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szBaseDir, szBaseDir );
+strcpy( psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szGroupKey, szGroupKey );
+strcpy( psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szAlterTime, szAlterTime );
+strcpy( psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szOldRootDir, szOldRootDir );
+strcpy( psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szOldBaseDir, szOldBaseDir );
+strcpy( psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szStoreMode, szStoreMode );
+
+printf( "%s ", psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szHostName ) ;
+printf( "%s ", psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szRootDir ) ;
+printf( "%s ", psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szBaseDir ) ;
+printf( "%s ", psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szGroupKey ) ;
+printf( "%s ", psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szAlterTime ) ;
+printf( "%s ", psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szOldRootDir ) ;
+printf( "%s ", psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szOldBaseDir ) ;
+printf( "%s\n", psData->psHead[nLoop]->psControl[atoi( szGroupKey + HEAD_FLAG_LEN )]->szStoreMode ) ;
+*/
+		
+		if( STORE_MODE_MODULUS == atoi( psControl->szStoreMode ) )
+		{
+			if( MY_SUCCEED != GetGroupKeyInfo( psControl ) )
+			{
+				MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "存储模式 %s 的分组字段 [%s] 无效!\n", szStoreMode , szGroupKey );
+				return MY_FAIL;
+			}
+		}
+		
+		lTotalHead++;
+	}
+
+	/*printf( "TEST : %s : %d : %d\n", __FILE__, __LINE__, lTotalHead ) ;*/
+	
+	EXEC SQL CLOSE curStore;
+
+	if( 0 >= lTotalHead )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "store_control_table 中没有主机 %s 的详单存储控制记录!\n", psData->sCmd.szHostName  );
+		return MY_FAIL;
+	}
+	
+	/*DebugOutStoreControlInfo( psData );*/
+	/*DebugStore( psData) ;*/
+	
+	return MY_SUCCEED;
+}
+
+int DebugStore( PSTORE_DATA psData )
+{
+	int nLoop, nLoop1;
+
+	for( nLoop = 0; nLoop < MAX_HEAD_NUM; nLoop++ ) {
+		if( psData->psHead[nLoop] != NULL ) {
+			printf( "TEST: %s %d %s %d\n", __FILE__, __LINE__, psData->psHead[nLoop]->szHeadFlag, psData->psHead[nLoop] ) ;
+		}
+		for( nLoop1 = 0; nLoop1 < MAX_MOBILE_HEAD; nLoop1++ ){
+			if( psData->psHead[nLoop]->psControl[nLoop1] != NULL ) {
+				printf( "TEST: DebugStore %s %d %s\n", __FILE__, __LINE__, psData->psHead[nLoop]->psControl[nLoop1]->szGroupKey ) ;
+			}
+		}
+	}
+
+	return MY_SUCCEED;
+}
+
+/************************************************************
+function: UpdateSysProc
+description: 更新控制标志 
+input: szCtlFlag, nRunFlag
+output:
+return: MY_SUCCEED: 成功, 失败退出
+others:
+***********************************************************/
+
+int UpdateSysProc( char *szCtlFlag, int nRunFlag ) 
+{
+	char szSql[2048] ;
+
+	bzero( szSql, sizeof(szSql) ) ;
+	sprintf( szSql, "update sys_proc set operator_id='%d' where program_name='%s'", nRunFlag, szCtlFlag ) ;
+	
+        EXEC SQL WHENEVER SQLERROR DO SqlError();
+        EXEC SQL PREPARE S FROM :szSql;
+        EXEC SQL DECLARE sys_c CURSOR FOR S;
+        EXEC SQL OPEN sys_c;
+        EXEC SQL WHENEVER NOT FOUND DO break;
+        EXEC SQL CLOSE sys_c;
+        EXEC SQL COMMIT ;
+
+	return MY_SUCCEED ;
+}
